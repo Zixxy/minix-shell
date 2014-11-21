@@ -1,39 +1,120 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
-#include <sys/types.h>
+
 #include <unistd.h>
 #include <errno.h>
 #include <sys/wait.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <fcntl.h>
+
 #include "config.h"
 #include "siparse.h"
 #include "utils.h"
 #include "sys/stat.h"
 #include "builtins.h"
+
 typedef int bool;
 
 
 #define true 1
 #define false 0
 
-#define DEBUG_DEFINE 8
 
-void execute_command(command* command){
-	if(command == NULL)
-		exit(1);
-	int res = execvp(command -> argv[0], command -> argv);
-	if(errno == ENOENT)
-		fprintf(stderr, "%s: no such file or directory\n",
-			command -> argv[0]);
-	else if(errno == EACCES)
-		fprintf(stderr, "%s: permission denied\n",
-			command -> argv[0]);
-	else
-		fprintf(stderr, "%s: exec error\n",
-			command -> argv[0]);
-	fflush(NULL);
-	exit(EXEC_FAILURE);
+redirection* find_in_redirection(redirection* redirections[]){
+	struct redirection* result_redirection = NULL;
+	for(int i = 0; redirections[i] != NULL; ++i)
+		if (IS_RIN(redirections[i]->flags))
+			result_redirection = redirections[i];
+	return result_redirection;
 }
+
+redirection* find_out_redirection(redirection* redirections[]){
+	struct redirection* result_redirection = NULL;
+	for(int i = 0; redirections[i] != NULL; ++i)
+		if (IS_ROUT(redirections[i]->flags) || IS_RAPPEND(redirections[i]->flags)) 
+			result_redirection = redirections[i];
+	return result_redirection;
+}
+
+void handle_openfile_error(const char* filename){
+	if(errno == EACCES)
+			fprintf(stderr, "%s: no such file or directory\n", filename);
+	else if(errno ==  ENOENT)
+			fprintf(stderr, "%s: permission denied\n", filename);
+	fflush(NULL);
+}
+
+void replace_stdin(redirection* redirect){
+	if(redirect == NULL)
+		return;
+	int in_fd = open(redirect->filename, O_RDONLY);
+	if(in_fd == -1){
+		handle_openfile_error(redirect->filename);
+		exit(EXEC_FAILURE);
+	}
+	else
+		dup2(in_fd, 0);
+}
+
+void replace_stdout(redirection* redirect){
+	if(redirect == NULL)
+		return;
+	int flags = O_WRONLY | O_CREAT;
+	if(IS_RAPPEND(redirect->flags))
+		flags |= O_APPEND;
+	else
+		flags |= O_TRUNC;
+
+	int out_fd = open(redirect->filename, flags);
+
+	if(out_fd == -1){
+		handle_openfile_error(redirect->filename);
+		exit(EXEC_FAILURE);
+	}
+	else
+		dup2(out_fd, 1);
+}
+
+void execute_command(const command* command){
+	if(command == NULL || *(command->argv) == NULL)
+		return;
+	
+	struct redirection **redirects = command -> redirs;
+	int child_pid = fork();
+	if(child_pid == -1)
+		exit(EXEC_FAILURE);
+	else if(child_pid == 0){
+		struct redirection* in_redirection = find_in_redirection(redirects);
+		struct redirection* out_redirection = find_out_redirection(redirects);
+
+		fflush(NULL);
+		replace_stdin(in_redirection);
+		replace_stdout(out_redirection);
+
+		int res = execvp(command -> argv[0], command -> argv);
+		if(errno == ENOENT)
+			fprintf(stderr, "%s: no such file or directory\n",
+				command -> argv[0]);
+		else if(errno == EACCES)
+			fprintf(stderr, "%s: permission denied\n",
+				command -> argv[0]);
+		else
+			fprintf(stderr, "%s: exec error\n",
+				command -> argv[0]);
+		fflush(NULL);
+		exit(EXEC_FAILURE);
+	}
+	else{
+		int status = waitpid(child_pid, NULL, 0);
+		if(status == -1){
+			printf("shell process couldnt do waitpid().");
+			fflush(NULL);
+		}
+	}
+}
+
 
 command* prepare_command(int length, char* bufor){
 	char* currentline;
@@ -71,6 +152,8 @@ void clear_bufor(char* bufor, int length){
 	for(int i = 0; i < length; ++i)
 		bufor[i] = 0;
 }
+
+
 void read_and_order_executing(bool terminal_mode){
 	char* bufor = (char*) calloc(2 * MAX_LINE_LENGTH + 2, sizeof(char));
 	char* first_part = NULL;
@@ -94,7 +177,7 @@ void read_and_order_executing(bool terminal_mode){
 
 		int prev = 0;
 		length += first_part_length;
-		for(int i = 0; i < length; ++i){		
+		for(int i = 0; i < length; ++i){	
 			if(bufor[i] == '\n' || bufor[i] == 0){
 				bufor[i] = 0;
 				fflush(stdout);
@@ -107,13 +190,21 @@ void read_and_order_executing(bool terminal_mode){
 				int u = 0;
 				bool executed = false;
 				while(1){
+					if(command == NULL)
+						break;
 					if(builtins_table[u].name == NULL)
 						break;
-					//printf("%s \n",*(command -> argv));
-					//printf("%s \n", builtins_table[u].name);
-					if(strcmp(builtins_table[u].name, *(command -> argv)) == 0){
-						//printcommand(command, 1);
-						builtins_table[u].fun(command -> argv);
+					if(strcmp(builtins_table[u].name, *(command -> argv)) == 0){ 
+					//maybe i dont need to exit here due to realloc will be done by system	
+						int result_l_functions = builtins_table[u].fun(command -> argv);
+						
+						if(result_l_functions == END_PROCCESS){
+							realloc(bufor, ((2 * MAX_LINE_LENGTH+2)*sizeof(char)));
+							int stop = 1;
+							fflush(stdout);
+							exit(0);
+						}
+						
 						executed = true;
 						break;
 					}
@@ -121,31 +212,13 @@ void read_and_order_executing(bool terminal_mode){
 					fflush(stdout);
 					++u;
 				}
-				if(!executed){
-					int child_pid = fork();
-					if(child_pid == -1){
-						printf(" fork didnt work\n");
-						fflush(NULL);
-					}
-					else if(child_pid == 0){
-						execute_command(command);
-					}
-					else{
-						int status = waitpid(child_pid, NULL, 0);
-						if(status == -1){
-							printf("shell process couldnt do waitpid() for executor.");
-							fflush(NULL);
-						}
-					}
-				}
-				
+				if(!executed)
+					execute_command(command);			
 				prev = i+1;
 			}
 		}
 
 		if(prev == 0 && length == MAX_LINE_LENGTH+1){
-			//printf("WAIT");
-			//fflush(stdout);
 			fprintf(stderr, "Syntax error.\n");
 			char cur = {0};
 			while(cur != '\n'){

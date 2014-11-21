@@ -5,6 +5,8 @@
 #include <signal.h>
 #include <dirent.h> 
 #include "builtins.h"
+#include "config.h"
+
 
 int echo(char*[]);
 int undefined(char *[]);
@@ -24,7 +26,7 @@ builtin_pair builtins_table[]={
 };
 
 int echo( char * argv[]){
-	int i =1;
+	int i =1;	
 	if (argv[i]) printf("%s", argv[i++]);
 	while  (argv[i])
 		printf(" %s", argv[i++]);
@@ -35,11 +37,19 @@ int echo( char * argv[]){
 }
 
 int endProcess(char * argv[]){ // need task about every children.(SIGCHILD) No to leave trash
-	exit(1);
+	return END_PROCCESS;
 }
 
 int lcd(char* argv[]){
 	int res;
+
+
+	char* additional_argument = argv[2];
+	if(additional_argument != NULL){
+		printError(argv);
+		return BUILTIN_ERROR;
+	}
+
 	if(argv[1] == NULL)
 		res = chdir(getenv("HOME"));
 	else
@@ -56,7 +66,7 @@ int convertToInt(char tab[]){
 	int sign = 1;
 	int dec = 1;
 	int res = 0;
-	while((48 <= tab[i] && 57 >= tab[i]) || (tab[i] == '-' && i == 0)){ // przerobic na pojedyncze wywolanie funkcji
+	while((48 <= tab[i] && 57 >= tab[i]) || (tab[i] == '-' && i == 0)){
 		if(tab[i] == '-')
 			sign *= -1;
 		else{
@@ -71,13 +81,30 @@ int convertToInt(char tab[]){
 }
 
 int lkill(char* argv[]){
+	char* additional_argument = argv[3];
+	if(additional_argument != NULL){
+		printError(argv);
+		return BUILTIN_ERROR;
+	}
+
 	int res;
-	if(argv[2] == NULL){ // wysylamy sigterm
-		res = kill(convertToInt(argv[1]), SIGTERM);
+	if(argv[1] == NULL){
+		printError(argv);
+		return BUILTIN_ERROR;
 	}
-	else{ 
-		res = kill(convertToInt(argv[1]), convertToInt(argv[2]));
+	if(argv[2] == NULL) // wysylamy sigterm
+		res = kill(atoi(argv[1]), SIGTERM);
+	else{
+		int sendsignal = atoi(argv[1]+1);
+		const int length = strlen(argv[1]);
+		char str_cp[length];
+		sprintf(str_cp, "%d", sendsignal);
+		if(strcmp(argv[1] + 1, str_cp))
+			return BUILTIN_ERROR;
+		sendsignal = sendsignal > 0 ? sendsignal : (-1) * sendsignal;
+		res = kill(atoi(argv[2]), sendsignal);
 	}
+
 	if(res == -1){
 		printError(argv);
 		return BUILTIN_ERROR;
@@ -86,21 +113,22 @@ int lkill(char* argv[]){
 }
 
 void printError(char* argv[]){
-	fprintf(stderr, "Builtin '%s' error.\n",
+	fprintf(stderr, "Builtin %s error.\n",
 			argv[0]);
 	fflush(stderr);
 }
 
-void
-print_directory(struct dirent * directory) {
+void print_directory(struct dirent * directory) {
 	if (directory -> d_name[0] != '.') 
-		printf("%s\n", entry->d_name);
+		printf("%s\n", directory->d_name);
 }
 
 int lls(char* argv[]){
-	char* additionalArgument = argv[1];
-	if(additional_argument != NULL)
+	char* additional_argument = argv[1];
+	if(additional_argument != NULL){
+		printError(argv);
 		return BUILTIN_ERROR;
+	}
 	
 	char current_path[PATH_MAX];
 	
@@ -115,7 +143,8 @@ int lls(char* argv[]){
 	struct dirent* directories = readdir(files);
 	
 	while(directories != NULL){
-		directories = print_directory(directories);
+		print_directory(directories);
+		directories = readdir(files);
 	}
 	
 	closedir(files);
