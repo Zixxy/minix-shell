@@ -20,7 +20,8 @@ typedef int bool;
 
 #define true 1
 #define false 0
-
+//#define STDOUT_FILENO STDOUT_FILENO_fileno
+//#define STDIN_FILENO STDIN_FILENO_fileno
 
 redirection* find_in_redirection(redirection* redirections[]){
 	struct redirection* result_redirection = NULL;
@@ -46,7 +47,7 @@ void handle_openfile_error(const char* filename){
 	fflush(NULL);
 }
 
-void replace_stdin(redirection* redirect){
+void replace_STDIN_FILENO(redirection* redirect){
 	if(redirect == NULL)
 		return;
 	int in_fd = open(redirect->filename, O_RDONLY);
@@ -55,10 +56,10 @@ void replace_stdin(redirection* redirect){
 		exit(EXEC_FAILURE);
 	}
 	else
-		dup2(in_fd, 0);
+		dup2(in_fd, STDIN_FILENO);
 }
 
-void replace_stdout(redirection* redirect){
+void replace_STDOUT_FILENO(redirection* redirect){
 	if(redirect == NULL)
 		return;
 	int flags = O_WRONLY | O_CREAT;
@@ -74,15 +75,40 @@ void replace_stdout(redirection* redirect){
 		exit(EXEC_FAILURE);
 	}
 	else
-		dup2(out_fd, 1);
+		dup2(out_fd, STDOUT_FILENO);
 }
 
-void execute_command(const command* command){
+bool controll_command(const command* command){
+	if(command -> argv[0] == NULL){
+		return false; // wrong
+	}
+	return true; // right
+}
+
+bool check_shell_command(const command* command){
 	if(command == NULL || *(command->argv) == NULL)
-		return;
-	
+		return false;
+
+	for(int u = 0; builtins_table[u].name != NULL; ++u){
+		if(strcmp(builtins_table[u].name, *(command -> argv)) == 0){
+			return true;
+		}
+	}
+	return false;
+}
+
+void execute_shell_command(const command* command){
+	for(int u = 0; builtins_table[u].name != NULL; ++u){
+		if(strcmp(builtins_table[u].name, *(command -> argv)) == 0){
+			builtins_table[u].fun(command -> argv);
+			return;
+		}
+	}
+}
+
+void execute_command(const command* command, int child_pid){
 	struct redirection **redirects = command -> redirs;
-	int child_pid = fork();
+
 	if(child_pid == -1)
 		exit(EXEC_FAILURE);
 	else if(child_pid == 0){
@@ -90,8 +116,8 @@ void execute_command(const command* command){
 		struct redirection* out_redirection = find_out_redirection(redirects);
 
 		fflush(NULL);
-		replace_stdin(in_redirection);
-		replace_stdout(out_redirection);
+		replace_STDIN_FILENO(in_redirection);
+		replace_STDOUT_FILENO(out_redirection);
 
 		int res = execvp(command -> argv[0], command -> argv);
 		if(errno == ENOENT)
@@ -107,11 +133,7 @@ void execute_command(const command* command){
 		exit(EXEC_FAILURE);
 	}
 	else{
-		int status = waitpid(child_pid, NULL, 0);
-		if(status == -1){
-			printf("shell process couldnt do waitpid().");
-			fflush(NULL);
-		}
+		return;
 	}
 }
 
@@ -141,6 +163,25 @@ command* prepare_command(int length, char* bufor){
 	return command;
 }
 
+line* prepare_line(int length, char* bufor){
+	char* currentline;
+	if(length == 0)
+			exit(1);
+	
+	if(length == MAX_LINE_LENGTH+1){
+		fprintf(stderr, "Syntax error.\n");
+		char cur = {0};
+		while(cur != '\n'){
+			char a[1] = {0};
+			read(0, a, 1);
+			cur = a[0];
+		}
+		return NULL;
+	}
+
+	return parseline(bufor);
+}
+
 void buffor_copy(char* tab1, char* tab2, int len1){
 	if(tab1 == NULL || len1 == 0)
 		return;
@@ -153,6 +194,94 @@ void clear_bufor(char* bufor, int length){
 		bufor[i] = 0;
 }
 
+void execute_line(line* line){
+
+	if(line == NULL 
+		|| *(line -> pipelines) == NULL 
+		|| (**(line->pipelines)) == NULL)
+		return;
+	for(int i = 0; (line -> pipelines)[i] != NULL; ++i){ // for each pipeline
+		pipeline cur_pipeline = (line -> pipelines)[i];
+		bool syntax_controll = true;
+		for(int u = 0; cur_pipeline[u]; ++u)
+			if(!controll_command(cur_pipeline[u]))
+				if((u == 0 && cur_pipeline[u+1]) || u > 0){
+					fprintf(stderr, "Syntax error.\n");
+					syntax_controll = false;
+					break;
+				}
+				else { // this mean line is command.
+					return;/*
+					syntax_controll = false;
+					break;*/
+				}
+		if(!syntax_controll)
+			continue;
+		int prev_fd[2] = {-1, -1};
+		int countPipes = 0;
+		for(int u = 0; cur_pipeline[u]; ++u){
+			if(u == 0 && check_shell_command(cur_pipeline[u])){
+				execute_shell_command(cur_pipeline[u]);
+				break;
+			}
+			int fd[2];
+			pipe(fd);
+			int child_pid = fork();
+			++countPipes;
+			if(child_pid > 0){
+				if(prev_fd[0] != -1)
+					close(prev_fd[0]);
+				if(prev_fd[1] != -1)
+					close(prev_fd[1]);
+			}
+			else{
+				if(u == 0){
+					if(!cur_pipeline[u+1]){// jest sam jeden
+						close(fd[1]);
+						close(fd[0]);
+					}
+					else{
+						fflush(NULL);
+						close(STDOUT_FILENO);
+						close(fd[0]);
+						dup2(fd[1], STDOUT_FILENO); // bierzemy z zwyklego STDIN_FILENO, piszemy do pipa jako STDOUT_FILENO
+					}
+				}
+				else if(cur_pipeline[u+1]){
+					close(STDIN_FILENO);
+					close(STDOUT_FILENO);
+					close(prev_fd[1]);
+					close(fd[0]);
+					dup2(prev_fd[0], STDIN_FILENO); // wyjscie poprzedniego wejsciem mojego procesu 
+					dup2(fd[1], STDOUT_FILENO); // piszemy do nastepnego pipa
+				}
+				else{
+					fflush(NULL);
+					close(fd[0]);
+					close(fd[1]);
+					close(STDIN_FILENO);
+					close(prev_fd[1]);
+					dup2(prev_fd[0], STDIN_FILENO);
+				}
+				execute_command(cur_pipeline[u], child_pid);
+			}
+			prev_fd[0] = fd[0];
+			prev_fd[1] = fd[1];
+		}
+		fflush(NULL);
+		close(prev_fd[0]);
+		close(prev_fd[1]);
+		int control_finnished_child = 0;
+		while(control_finnished_child < countPipes){
+			++control_finnished_child;
+			int status = wait(NULL);
+			if(status == -1){
+				printf("shell process couldnt do waitpid().");
+				fflush(NULL);
+			}
+		}
+	}
+}
 
 void read_and_order_executing(bool terminal_mode){
 	char* bufor = (char*) calloc(2 * MAX_LINE_LENGTH + 2, sizeof(char));
@@ -180,40 +309,13 @@ void read_and_order_executing(bool terminal_mode){
 		for(int i = 0; i < length; ++i){	
 			if(bufor[i] == '\n' || bufor[i] == 0){
 				bufor[i] = 0;
-				fflush(stdout);
+				fflush(NULL);
 				if(i == prev){
 					++prev;
 					continue;
 				}
-				command* command = prepare_command(i - prev, bufor + prev);
-
-				int u = 0;
-				bool executed = false;
-				while(1){
-					if(command == NULL)
-						break;
-					if(builtins_table[u].name == NULL)
-						break;
-					if(strcmp(builtins_table[u].name, *(command -> argv)) == 0){ 
-					//maybe i dont need to exit here due to realloc will be done by system	
-						int result_l_functions = builtins_table[u].fun(command -> argv);
-						
-						if(result_l_functions == END_PROCCESS){
-							realloc(bufor, ((2 * MAX_LINE_LENGTH+2)*sizeof(char)));
-							int stop = 1;
-							fflush(stdout);
-							exit(0);
-						}
-						
-						executed = true;
-						break;
-					}
-
-					fflush(stdout);
-					++u;
-				}
-				if(!executed)
-					execute_command(command);			
+				line* line = prepare_line(i - prev, bufor + prev);
+				execute_line(line);	
 				prev = i+1;
 			}
 		}

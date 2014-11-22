@@ -37,7 +37,7 @@ int echo( char * argv[]){
 }
 
 int endProcess(char * argv[]){ // need task about every children.(SIGCHILD) No to leave trash
-	return END_PROCCESS;
+	exit(0);
 }
 
 int lcd(char* argv[]){
