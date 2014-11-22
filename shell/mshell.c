@@ -194,6 +194,23 @@ void clear_bufor(char* bufor, int length){
 		bufor[i] = 0;
 }
 
+bool control_pipeline(const pipeline pipe){
+	for(int u = 0; pipe[u]; ++u)
+			if(!controll_command(pipe[u]))
+				if((u == 0 && pipe[u+1]) || u > 0){
+					fprintf(stderr, "Syntax error.\n");
+					return false;
+				}
+				else  // line is comment.
+					return false;	
+	return true;
+}
+
+void close_each_fd(int* t, int length){ // array ended with -1
+	for(int i = 0; i < length; ++i)
+		close(t[i]); // handling errors with closing possible
+}
+
 void execute_line(line* line){
 
 	if(line == NULL 
@@ -202,22 +219,9 @@ void execute_line(line* line){
 		return;
 	for(int i = 0; (line -> pipelines)[i] != NULL; ++i){ // for each pipeline
 		pipeline cur_pipeline = (line -> pipelines)[i];
-		bool syntax_controll = true;
-		for(int u = 0; cur_pipeline[u]; ++u)
-			if(!controll_command(cur_pipeline[u]))
-				if((u == 0 && cur_pipeline[u+1]) || u > 0){
-					fprintf(stderr, "Syntax error.\n");
-					syntax_controll = false;
-					break;
-				}
-				else { // this mean line is command.
-					return;/*
-					syntax_controll = false;
-					break;*/
-				}
-		if(!syntax_controll)
-			continue;
-		int prev_fd[2] = {-1, -1};
+		if(!control_pipeline(cur_pipeline))
+			continue;int prev_fd[2] = {-1, -1};
+		
 		int countPipes = 0;
 		for(int u = 0; cur_pipeline[u]; ++u){
 			if(u == 0 && check_shell_command(cur_pipeline[u])){
@@ -271,6 +275,7 @@ void execute_line(line* line){
 		fflush(NULL);
 		close(prev_fd[0]);
 		close(prev_fd[1]);
+		
 		int control_finnished_child = 0;
 		while(control_finnished_child < countPipes){
 			++control_finnished_child;
