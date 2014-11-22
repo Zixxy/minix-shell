@@ -40,26 +40,28 @@ redirection* find_out_redirection(redirection* redirections[]){
 }
 
 void handle_openfile_error(const char* filename){
-	if(errno == EACCES)
+	if(errno == ENOENT)
 			fprintf(stderr, "%s: no such file or directory\n", filename);
-	else if(errno ==  ENOENT)
+	else if(errno ==  EACCES)
 			fprintf(stderr, "%s: permission denied\n", filename);
 	fflush(NULL);
 }
 
-void replace_STDIN_FILENO(redirection* redirect){
+void replace_stdin(redirection* redirect){
 	if(redirect == NULL)
 		return;
-	int in_fd = open(redirect->filename, O_RDONLY);
+	int in_fd = open(redirect->filename, O_RDONLY, S_IRUSR | S_IWUSR | S_IRWXO);
 	if(in_fd == -1){
 		handle_openfile_error(redirect->filename);
 		exit(EXEC_FAILURE);
 	}
-	else
+	else{
 		dup2(in_fd, STDIN_FILENO);
+		close(in_fd);
+	}
 }
 
-void replace_STDOUT_FILENO(redirection* redirect){
+void replace_stdout(redirection* redirect){
 	if(redirect == NULL)
 		return;
 	int flags = O_WRONLY | O_CREAT;
@@ -68,14 +70,16 @@ void replace_STDOUT_FILENO(redirection* redirect){
 	else
 		flags |= O_TRUNC;
 
-	int out_fd = open(redirect->filename, flags);
+	int out_fd = open(redirect->filename, flags, S_IRUSR | S_IWUSR | S_IRWXO);
 
 	if(out_fd == -1){
 		handle_openfile_error(redirect->filename);
 		exit(EXEC_FAILURE);
 	}
-	else
+	else{
 		dup2(out_fd, STDOUT_FILENO);
+		close(out_fd);
+	}
 }
 
 bool controll_command(const command* command){
@@ -116,8 +120,8 @@ void execute_command(const command* command, int child_pid){
 		struct redirection* out_redirection = find_out_redirection(redirects);
 
 		fflush(NULL);
-		replace_STDIN_FILENO(in_redirection);
-		replace_STDOUT_FILENO(out_redirection);
+		replace_stdin(in_redirection);
+		replace_stdout(out_redirection);
 
 		int res = execvp(command -> argv[0], command -> argv);
 		if(errno == ENOENT)
@@ -194,23 +198,6 @@ void clear_bufor(char* bufor, int length){
 		bufor[i] = 0;
 }
 
-bool control_pipeline(const pipeline pipe){
-	for(int u = 0; pipe[u]; ++u)
-			if(!controll_command(pipe[u]))
-				if((u == 0 && pipe[u+1]) || u > 0){
-					fprintf(stderr, "Syntax error.\n");
-					return false;
-				}
-				else  // line is comment.
-					return false;	
-	return true;
-}
-
-void close_each_fd(int* t, int length){ // array ended with -1
-	for(int i = 0; i < length; ++i)
-		close(t[i]); // handling errors with closing possible
-}
-
 void execute_line(line* line){
 
 	if(line == NULL 
@@ -219,9 +206,22 @@ void execute_line(line* line){
 		return;
 	for(int i = 0; (line -> pipelines)[i] != NULL; ++i){ // for each pipeline
 		pipeline cur_pipeline = (line -> pipelines)[i];
-		if(!control_pipeline(cur_pipeline))
-			continue;int prev_fd[2] = {-1, -1};
-		
+		bool syntax_controll = true;
+		for(int u = 0; cur_pipeline[u]; ++u)
+			if(!controll_command(cur_pipeline[u]))
+				if((u == 0 && cur_pipeline[u+1]) || u > 0){
+					fprintf(stderr, "Syntax error.\n");
+					syntax_controll = false;
+					break;
+				}
+				else { // this mean line is command.
+					return;/*
+					syntax_controll = false;
+					break;*/
+				}
+		if(!syntax_controll)
+			continue;
+		int prev_fd[2] = {-1, -1};
 		int countPipes = 0;
 		for(int u = 0; cur_pipeline[u]; ++u){
 			if(u == 0 && check_shell_command(cur_pipeline[u])){
@@ -245,10 +245,11 @@ void execute_line(line* line){
 						close(fd[0]);
 					}
 					else{
-						fflush(NULL);
 						close(STDOUT_FILENO);
 						close(fd[0]);
-						dup2(fd[1], STDOUT_FILENO); // bierzemy z zwyklego STDIN_FILENO, piszemy do pipa jako STDOUT_FILENO
+						dup2(fd[1], STDOUT_FILENO);
+						close(fd[1]);
+ // bierzemy z zwyklego STDIN_FILENO, piszemy do pipa jako STDOUT_FILENO
 					}
 				}
 				else if(cur_pipeline[u+1]){
@@ -258,6 +259,8 @@ void execute_line(line* line){
 					close(fd[0]);
 					dup2(prev_fd[0], STDIN_FILENO); // wyjscie poprzedniego wejsciem mojego procesu 
 					dup2(fd[1], STDOUT_FILENO); // piszemy do nastepnego pipa
+					close(prev_fd[0]);
+					close(fd[1]);
 				}
 				else{
 					fflush(NULL);
@@ -266,6 +269,7 @@ void execute_line(line* line){
 					close(STDIN_FILENO);
 					close(prev_fd[1]);
 					dup2(prev_fd[0], STDIN_FILENO);
+					close(prev_fd[0]);
 				}
 				execute_command(cur_pipeline[u], child_pid);
 			}
@@ -275,7 +279,6 @@ void execute_line(line* line){
 		fflush(NULL);
 		close(prev_fd[0]);
 		close(prev_fd[1]);
-		
 		int control_finnished_child = 0;
 		while(control_finnished_child < countPipes){
 			++control_finnished_child;
