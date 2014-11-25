@@ -8,6 +8,7 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <fcntl.h>
+#include <signal.h>
 
 #include "config.h"
 #include "siparse.h"
@@ -20,8 +21,104 @@ typedef int bool;
 
 #define true 1
 #define false 0
+
+#define CONTROLLED_CHILDREN 1000
 //#define STDOUT_FILENO STDOUT_FILENO_fileno
 //#define STDIN_FILENO STDIN_FILENO_fileno
+
+
+/*bacground children*/
+pid_t finished_background_pids[CONTROLLED_CHILDREN];
+int finished_background_status[CONTROLLED_CHILDREN];
+/*bacground children*/
+bool is_foreground_child();
+
+pid_t foreground_children[CONTROLLED_CHILDREN];
+
+struct sigaction foreground_sigaction;
+struct sigaction background_sigaction;
+
+volatile int background_number;
+volatile int foreground_number;
+
+void sigchild_handler(int sig_nb){
+	int chld_status;
+	while(foreground_number){
+		pid_t pid = waitpid(-1, &chld_status, WNOHANG);
+		if(is_foreground_child(pid))
+			--foreground_number;
+		else if(pid == 0)
+			return;
+		else{
+			finished_background_status[background_number] = chld_status;
+			finished_background_pids[background_number++] = pid;
+		}
+	}
+}
+
+bool is_foreground_child(pid_t child_pid){
+	for(int i = 0; i < CONTROLLED_CHILDREN; ++i) // if i < foreground_number
+		if(foreground_children[i] == child_pid){
+			return true;
+		}
+	return false;
+}
+
+void print_finished_background_number(){
+	sigset_t mask;
+	sigemptyset(&mask);
+	sigaddset(&mask, SIGCHLD);
+	sigprocmask(SIG_BLOCK, &mask, NULL);
+	//printf("background_number = %d \n", background_number);
+	for(int i = 0; i < background_number; ++i){
+		if(WIFSIGNALED(finished_background_status[i]))
+			printf("Background process %d terminated. (killed by signal %d)\n", 
+				finished_background_pids[i]
+				,WTERMSIG(finished_background_status[i]));
+		else
+			printf("Background process %d terminated. (exited with status %d)\n", 
+				finished_background_pids[i], 
+				finished_background_status[i]);
+	}
+	fflush(NULL);
+	background_number = 0;
+	sigprocmask(SIG_UNBLOCK, &mask, NULL);
+}
+
+
+void set_sigchld_handler(){
+	foreground_sigaction.sa_handler = sigchild_handler;
+	foreground_sigaction.sa_flags = 0;
+
+	sigemptyset(&foreground_sigaction.sa_mask);
+	sigaction(SIGCHLD, &foreground_sigaction, NULL);
+}
+
+void ignore_sigign(){
+	foreground_sigaction.sa_handler = SIG_IGN;
+	foreground_sigaction.sa_flags = 0;
+
+	sigemptyset(&foreground_sigaction.sa_mask);
+	sigaction(SIGINT, &foreground_sigaction, NULL);
+}
+
+void set_default_handlers(){
+	background_sigaction.sa_handler = SIG_DFL;
+	background_sigaction.sa_flags = 0;
+
+	sigemptyset(&background_sigaction.sa_mask);
+	sigaction(SIGCHLD, &background_sigaction, NULL); 
+
+	background_sigaction.sa_handler = SIG_DFL;
+	sigaction(SIGINT, &background_sigaction, NULL); 
+}
+
+void set_this_background(){
+	set_default_handlers();
+	int res = setsid();
+	if(res == -1)
+		exit(1);
+}
 
 redirection* find_in_redirection(redirection* redirections[]){
 	struct redirection* result_redirection = NULL;
@@ -186,20 +283,22 @@ line* prepare_line(int length, char* bufor){
 	return parseline(bufor);
 }
 
-void buffor_copy(char* tab1, char* tab2, int len1){
-	if(tab1 == NULL || len1 == 0)
-		return;
-	for(int i = 0; i < len1; ++i)
-		tab2[i] = tab1[i];
+void block_sigchld(){
+	sigset_t mask;
+	sigemptyset(&mask);
+	sigaddset(&mask, SIGCHLD);
+	sigprocmask(SIG_BLOCK, &mask, NULL);
 }
 
-void clear_bufor(char* bufor, int length){
-	for(int i = 0; i < length; ++i)
-		bufor[i] = 0;
+void unblock_sigchld(){
+	sigset_t mask;
+	sigemptyset(&mask);
+	sigaddset(&mask, SIGCHLD);
+	sigprocmask(SIG_UNBLOCK, &mask, NULL);
 }
 
 void execute_line(line* line){
-
+//	printparsedline(line);
 	if(line == NULL 
 		|| *(line -> pipelines) == NULL 
 		|| (**(line->pipelines)) == NULL)
@@ -214,15 +313,13 @@ void execute_line(line* line){
 					syntax_controll = false;
 					break;
 				}
-				else { // this mean line is command.
-					return;/*
-					syntax_controll = false;
-					break;*/
+				else { // line is command.
+					return;
 				}
 		if(!syntax_controll)
 			continue;
 		int prev_fd[2] = {-1, -1};
-		int countPipes = 0;
+		block_sigchld();
 		for(int u = 0; cur_pipeline[u]; ++u){
 			if(u == 0 && check_shell_command(cur_pipeline[u])){
 				execute_shell_command(cur_pipeline[u]);
@@ -231,34 +328,41 @@ void execute_line(line* line){
 			int fd[2];
 			pipe(fd);
 			int child_pid = fork();
-			++countPipes;
 			if(child_pid > 0){
 				if(prev_fd[0] != -1)
 					close(prev_fd[0]);
 				if(prev_fd[1] != -1)
 					close(prev_fd[1]);
+				if(!line -> flags & LINBACKGROUND){
+					foreground_children[foreground_number++] = child_pid;
+				//	printf("foreground chld %d\n",child_pid );
+				}
 			}
 			else{
+				if(line -> flags & LINBACKGROUND){
+					set_this_background();
+				}
+
+				set_default_handlers();
 				if(u == 0){
-					if(!cur_pipeline[u+1]){// jest sam jeden
+					if(!cur_pipeline[u+1]){
 						close(fd[1]);
 						close(fd[0]);
 					}
 					else{
-						close(STDOUT_FILENO);
+						close(STDOUT_FILENO);//to delete
 						close(fd[0]);
 						dup2(fd[1], STDOUT_FILENO);
 						close(fd[1]);
- // bierzemy z zwyklego STDIN_FILENO, piszemy do pipa jako STDOUT_FILENO
 					}
 				}
 				else if(cur_pipeline[u+1]){
-					close(STDIN_FILENO);
-					close(STDOUT_FILENO);
+					close(STDIN_FILENO);//to delete
+					close(STDOUT_FILENO);//to delete
 					close(prev_fd[1]);
 					close(fd[0]);
-					dup2(prev_fd[0], STDIN_FILENO); // wyjscie poprzedniego wejsciem mojego procesu 
-					dup2(fd[1], STDOUT_FILENO); // piszemy do nastepnego pipa
+					dup2(prev_fd[0], STDIN_FILENO);
+					dup2(fd[1], STDOUT_FILENO);
 					close(prev_fd[0]);
 					close(fd[1]);
 				}
@@ -266,7 +370,7 @@ void execute_line(line* line){
 					fflush(NULL);
 					close(fd[0]);
 					close(fd[1]);
-					close(STDIN_FILENO);
+					close(STDIN_FILENO);//to delete
 					close(prev_fd[1]);
 					dup2(prev_fd[0], STDIN_FILENO);
 					close(prev_fd[0]);
@@ -279,16 +383,36 @@ void execute_line(line* line){
 		fflush(NULL);
 		close(prev_fd[0]);
 		close(prev_fd[1]);
-		int control_finnished_child = 0;
-		while(control_finnished_child < countPipes){
-			++control_finnished_child;
-			int status = wait(NULL);
-			if(status == -1){
-				printf("shell process couldnt do waitpid().");
-				fflush(NULL);
-			}
+		while(foreground_number){
+			sigset_t mask;
+			sigfillset(&mask);
+			sigdelset(&mask, SIGCHLD);
+			sigsuspend(&mask);
 		}
+		unblock_sigchld();
 	}
+}
+
+/*
+void delimitate_background_process(const line* line){
+	if(line -> flags && LINBACKGROUND){
+		int child_pid = fork();
+		if(child_pid > 0) //
+			return;
+
+	}
+}*/
+
+void buffor_copy(char* tab1, char* tab2, int len1){
+	if(tab1 == NULL || len1 == 0)
+		return;
+	for(int i = 0; i < len1; ++i)
+		tab2[i] = tab1[i];
+}
+
+void clear_bufor(char* bufor, int length){
+	for(int i = 0; i < length; ++i)
+		bufor[i] = 0;
 }
 
 void read_and_order_executing(bool terminal_mode){
@@ -298,14 +422,24 @@ void read_and_order_executing(bool terminal_mode){
 	int first_part_length = 0;
 
 	while(true){
-		
+
 		if(terminal_mode){
+			print_finished_background_number();
 			printf(PROMPT_STR);
 			fflush(NULL);
 		}
 
-		int length = read(0, bufor+first_part_length, 
+		int length = -1;
+		do{
+			length = read(0, bufor+first_part_length, 
 			MAX_LINE_LENGTH + 1 - first_part_length);
+			if(length == -1){
+				if(errno == EINTR)
+					continue;
+				else
+					exit(0);
+			}
+		}while(length == -1);
 
 		if(length == 0){
 			realloc(bufor, ((2 * MAX_LINE_LENGTH+2)*sizeof(char)));
@@ -360,18 +494,25 @@ void read_and_order_executing(bool terminal_mode){
 	}
 }
 
+void initial_settings(){
+	set_sigchld_handler();
+	ignore_sigign();
 
+	background_number = 0;
+
+	foreground_number = 0;
+}
 
 int	main(int argc, char *argv[])
 {
+	initial_settings();
+
 	bool terminal_mode = true;
 
 	struct stat status;
 	fstat(0, &status);
 		
-	if(S_ISCHR(status.st_mode) == 0){
+	if(S_ISCHR(status.st_mode) == 0)
 		terminal_mode = false;
-	}
-	
 	read_and_order_executing(terminal_mode);
 }

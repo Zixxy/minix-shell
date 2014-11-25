@@ -5,8 +5,6 @@
 
 #define SYNTAX_ERROR_STR "Syntax error."
 
-#define END_PROCCESS (2 << 31 -1)
-
 #define EXEC_FAILURE 127
 
 #define PROMPT_STR "$ "
