@@ -45,10 +45,10 @@ void sigchild_handler(int sig_nb){
 	int chld_status;
 	while(foreground_number){
 		pid_t pid = waitpid(-1, &chld_status, WNOHANG);
-		if(is_foreground_child(pid))
-			--foreground_number;
-		else if(pid == 0)
+		if(pid == 0)
 			return;
+		else if(is_foreground_child(pid))
+			--foreground_number;
 		else{
 			finished_background_status[background_number] = chld_status;
 			finished_background_pids[background_number++] = pid;
@@ -59,9 +59,24 @@ void sigchild_handler(int sig_nb){
 bool is_foreground_child(pid_t child_pid){
 	for(int i = 0; i < CONTROLLED_CHILDREN; ++i) // if i < foreground_number
 		if(foreground_children[i] == child_pid){
+			//printf("%d\n",child_pid );
 			return true;
 		}
 	return false;
+}
+
+void block_sigchld(){
+	sigset_t mask;
+	sigemptyset(&mask);
+	sigaddset(&mask, SIGCHLD);
+	sigprocmask(SIG_BLOCK, &mask, NULL);
+}
+
+void unblock_sigchld(){
+	sigset_t mask;
+	sigemptyset(&mask);
+	sigaddset(&mask, SIGCHLD);
+	sigprocmask(SIG_UNBLOCK, &mask, NULL);
 }
 
 void print_finished_background_number(){
@@ -116,7 +131,7 @@ void set_default_handlers(){
 void set_this_background(){
 	set_default_handlers();
 	int res = setsid();
-	if(res == -1)
+	if(res == -1) //not handled
 		exit(1);
 }
 
@@ -283,20 +298,6 @@ line* prepare_line(int length, char* bufor){
 	return parseline(bufor);
 }
 
-void block_sigchld(){
-	sigset_t mask;
-	sigemptyset(&mask);
-	sigaddset(&mask, SIGCHLD);
-	sigprocmask(SIG_BLOCK, &mask, NULL);
-}
-
-void unblock_sigchld(){
-	sigset_t mask;
-	sigemptyset(&mask);
-	sigaddset(&mask, SIGCHLD);
-	sigprocmask(SIG_UNBLOCK, &mask, NULL);
-}
-
 void execute_line(line* line){
 //	printparsedline(line);
 	if(line == NULL 
@@ -416,7 +417,7 @@ void clear_bufor(char* bufor, int length){
 }
 
 void read_and_order_executing(bool terminal_mode){
-	char* bufor = (char*) calloc(2 * MAX_LINE_LENGTH + 2, sizeof(char));
+	char* bufor = (char*) calloc(2 * MAX_LINE_LENGTH + 2, sizeof(char));//buffer xD
 	char* first_part = NULL;
 
 	int first_part_length = 0;
@@ -428,6 +429,9 @@ void read_and_order_executing(bool terminal_mode){
 			printf(PROMPT_STR);
 			fflush(NULL);
 		}
+
+		for(int i = 0; i < CONTROLLED_CHILDREN; ++i)
+			foreground_children[i] = -1; //clear. Upiekszyc troszke...
 
 		int length = -1;
 		do{
