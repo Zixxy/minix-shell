@@ -109,7 +109,7 @@ void set_sigchld_handler(){
 	sigaction(SIGCHLD, &foreground_sigaction, NULL);
 }
 
-void ignore_sigign(){
+void ignore_sigint(){
 	foreground_sigaction.sa_handler = SIG_IGN;
 	foreground_sigaction.sa_flags = 0;
 
@@ -194,13 +194,6 @@ void replace_stdout(redirection* redirect){
 	}
 }
 
-bool controll_command(const command* command){
-	if(command -> argv[0] == NULL){
-		return false; // wrong
-	}
-	return true; // right
-}
-
 bool check_shell_command(const command* command){
 	if(command == NULL || *(command->argv) == NULL)
 		return false;
@@ -253,32 +246,6 @@ void execute_command(const command* command, int child_pid){
 	}
 }
 
-
-command* prepare_command(int length, char* bufor){
-	char* currentline;
-	if(length == 0)
-			exit(1);
-	
-	if(length == MAX_LINE_LENGTH+1){
-		fprintf(stderr, "Syntax error.\n");
-		char cur = {0};
-		while(cur != '\n'){
-			char a[1] = {0};
-			read(0, a, 1);
-			cur = a[0];
-		}
-		return NULL;
-	}
-	
-	line * line = parseline(bufor);
-	command* command = pickfirstcommand(line);
-	if(command == NULL 
-		|| command -> argv == NULL
-		|| command -> argv[0] == NULL)
-			return NULL;
-	return command;
-}
-
 line* prepare_line(int length, char* bufor){
 	char* currentline;
 	if(length == 0)
@@ -298,6 +265,27 @@ line* prepare_line(int length, char* bufor){
 	return parseline(bufor);
 }
 
+bool controll_command(const command* command){
+	if(command -> argv[0] == NULL){
+		return false; // wrong
+	}
+	return true; // right
+}
+
+bool controll_syntax(pipeline pipe){
+	for(int u = 0; pipe[u]; ++u)
+		if(pipe[u]  -> argv[0] == NULL)
+			if((u == 0 && pipe[u+1]) || u > 0){
+				fprintf(stderr, "Syntax error.\n");
+				return false;
+			}
+			else { // line is command.
+				return false;
+			}
+	return true;
+}
+
+
 void execute_line(line* line){
 //	printparsedline(line);
 	if(line == NULL 
@@ -306,19 +294,10 @@ void execute_line(line* line){
 		return;
 	for(int i = 0; (line -> pipelines)[i] != NULL; ++i){ // for each pipeline
 		pipeline cur_pipeline = (line -> pipelines)[i];
-		bool syntax_controll = true;
-		for(int u = 0; cur_pipeline[u]; ++u)
-			if(!controll_command(cur_pipeline[u]))
-				if((u == 0 && cur_pipeline[u+1]) || u > 0){
-					fprintf(stderr, "Syntax error.\n");
-					syntax_controll = false;
-					break;
-				}
-				else { // line is command.
-					return;
-				}
-		if(!syntax_controll)
-			continue;
+
+		if(!controll_syntax(cur_pipeline))
+			return;
+
 		int prev_fd[2] = {-1, -1};
 		block_sigchld();
 		for(int u = 0; cur_pipeline[u]; ++u){
@@ -393,16 +372,6 @@ void execute_line(line* line){
 		unblock_sigchld();
 	}
 }
-
-/*
-void delimitate_background_process(const line* line){
-	if(line -> flags && LINBACKGROUND){
-		int child_pid = fork();
-		if(child_pid > 0) //
-			return;
-
-	}
-}*/
 
 void buffor_copy(char* tab1, char* tab2, int len1){
 	if(tab1 == NULL || len1 == 0)
@@ -500,7 +469,7 @@ void read_and_order_executing(bool terminal_mode){
 
 void initial_settings(){
 	set_sigchld_handler();
-	ignore_sigign();
+	ignore_sigint();
 
 	background_number = 0;
 
